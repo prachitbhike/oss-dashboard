@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { v4 as uuidv4 } from 'uuid';
 import { scrapeUrl } from '@/lib/scraper';
 import { generateOutreachEmail } from '@/lib/anthropic';
 import { getProfile } from '@/lib/config';
+import { emailDb } from '@/lib/db';
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,6 +27,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Check if we got enough content to generate a meaningful email
+    const hasContent = scrapeResult.content && scrapeResult.content.length > 50;
+    const hasDescription = scrapeResult.description && scrapeResult.description.length > 10;
+
+    if (!hasContent && !hasDescription) {
+      return NextResponse.json(
+        {
+          error: `Could not extract enough content from ${url}. The site may use JavaScript to load content or have bot protection. Try a different URL or add company details manually.`
+        },
+        { status: 400 }
+      );
+    }
+
     // Build company content for the prompt
     const companyContent = `
 Title: ${scrapeResult.title}
@@ -42,7 +57,23 @@ Content: ${scrapeResult.content}
       profile,
     });
 
+    // Auto-save to database
+    const now = Date.now();
+    const id = uuidv4();
+
+    emailDb.create.run({
+      id,
+      url,
+      company_name: result.companyName,
+      company_summary: result.summary || null,
+      original_email: result.email,
+      current_email: result.email,
+      created_at: now,
+      updated_at: now,
+    });
+
     return NextResponse.json({
+      id,
       email: result.email,
       companyName: result.companyName,
       summary: result.summary,

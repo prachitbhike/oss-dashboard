@@ -8,9 +8,11 @@
  * - Graceful error handling per item
  */
 
+import { v4 as uuidv4 } from 'uuid';
 import { scrapeUrl } from './scraper';
-import { generateOutreachEmail } from './anthropic';
+import { generateOutreachEmail, PromptSettings } from './anthropic';
 import { getProfile, UserProfile } from './config';
+import { emailDb } from './db';
 import {
   RateLimiter,
   ConcurrencyLimiter,
@@ -46,6 +48,7 @@ export interface BatchProcessorConfig {
   maxConcurrent?: number;        // Max concurrent processing (default: 5)
   claudeRpm?: number;            // Claude requests per minute (default: 40)
   scrapeRps?: number;            // Scrape requests per second (default: 10)
+  promptSettings?: PromptSettings; // Custom prompt settings
   onProgress?: (progress: BatchProgress, latestResult?: BatchItemResult) => void;
   onItemComplete?: (result: BatchItemResult) => void;
 }
@@ -68,12 +71,14 @@ export class BatchProcessor {
   private onProgress?: (progress: BatchProgress, latestResult?: BatchItemResult) => void;
   private onItemComplete?: (result: BatchItemResult) => void;
   private profile: UserProfile;
+  private promptSettings?: PromptSettings;
 
   constructor(config: BatchProcessorConfig = {}) {
     const {
       maxConcurrent = 5,
       claudeRpm = 40,
       scrapeRps = 10,
+      promptSettings,
       onProgress,
       onItemComplete,
     } = config;
@@ -104,6 +109,7 @@ export class BatchProcessor {
     this.onProgress = onProgress;
     this.onItemComplete = onItemComplete;
     this.profile = getProfile();
+    this.promptSettings = promptSettings;
   }
 
   /**
@@ -211,6 +217,21 @@ Content: ${scrapeResult.content}
         companyContent,
         companyUrl: item.url,
         profile: this.profile,
+        promptSettings: this.promptSettings,
+      });
+
+      // Save to database
+      const now = Date.now();
+      const dbId = uuidv4();
+      emailDb.create.run({
+        id: dbId,
+        url: item.url,
+        company_name: emailResult.companyName,
+        company_summary: emailResult.summary || null,
+        original_email: emailResult.email,
+        current_email: emailResult.email,
+        created_at: now,
+        updated_at: now,
       });
 
       return {

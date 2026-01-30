@@ -3,10 +3,86 @@ import { UserProfile } from './config';
 
 const anthropic = new Anthropic();
 
+export const DEFAULT_SYSTEM_PROMPT = `You are an expert at writing personalized, authentic VC outreach emails. Your emails sound natural and human - never templated or formulaic.
+
+Your task is to generate a warm, personalized outreach email from a VC to a startup founder.
+
+Guidelines:
+- Keep the email between 100-150 words (3-4 short paragraphs)
+- Start with a genuine, specific hook about why their company or product is unique and interesting. Think carefully about what makes the company differentiated.
+- Add a thoughtful perspective on the market that shows you understand their world and have done research.
+- End with a soft ask for a quick chat (not pushy)
+- Sound conversational and human, not corporate
+- Don't use buzzwords or clichés.
+- Don't start with "I hope this email finds you well" or similar generic openings`;
+
+export const DEFAULT_FOLLOW_UP_SYSTEM_PROMPT = `You write natural follow-up emails. Keep it brief (50-80 words), casual but professional. Reference your previous outreach without repeating the pitch. Show continued interest without being pushy.
+
+Guidelines by follow-up number:
+- 1st follow-up: Light check-in, reference initial email
+- 2nd follow-up: Offer something of value (insight, relevant news)
+- 3rd+: Final touch, leave door open gracefully
+
+Keep the same signature style as the original email.`;
+
+export const DEFAULT_FOLLOW_UP_USER_PROMPT_TEMPLATE = `Generate a follow-up email based on this information:
+
+**Company:** {{companyName}}
+**Company Summary:** {{companySummary}}
+**Company URL:** {{companyUrl}}
+
+**Original Email:**
+{{originalEmail}}
+
+{{previousFollowUps}}
+
+**Follow-up Number:** {{followUpNumber}} (this is follow-up #{{followUpNumber}})
+
+**Sender Profile:**
+- Name: {{profileName}}
+- Firm: {{profileFirm}}
+
+Please respond in the following JSON format:
+{
+  "email": "The follow-up email content including signature"
+}
+
+Generate a natural, brief follow-up that references the previous outreach appropriately for follow-up #{{followUpNumber}}.`;
+
+export const DEFAULT_USER_PROMPT_TEMPLATE = `Generate an outreach email based on this information:
+
+**Company URL:** {{companyUrl}}
+
+**Company Information:**
+{{companyContent}}
+
+**Sender Profile:**
+- Name: {{profileName}}
+- Firm: {{profileFirm}}
+- Role: {{profileRole}}
+
+
+Please respond in the following JSON format:
+{
+  "companyName": "The company's name",
+  "summary": "A 1-2 sentence summary of what the company does",
+  "email": "The full outreach email including the signature"
+}
+
+Make sure the email is personalized based on specific details from the company information.`;
+
+export interface PromptSettings {
+  systemPrompt: string;
+  userPromptTemplate: string;
+  followUpSystemPrompt?: string;
+  followUpUserPromptTemplate?: string;
+}
+
 interface GenerateEmailParams {
   companyContent: string;
   companyUrl: string;
   profile: UserProfile;
+  promptSettings?: PromptSettings;
 }
 
 interface GenerateEmailResult {
@@ -15,182 +91,147 @@ interface GenerateEmailResult {
   summary: string;
 }
 
-// Maximum number of turns to prevent infinite loops
-const MAX_TOOL_USE_TURNS = 10;
+function buildUserPrompt(
+  template: string,
+  companyUrl: string,
+  companyContent: string,
+  profile: UserProfile
+): string {
+  return template
+    .replace(/\{\{companyUrl\}\}/g, companyUrl)
+    .replace(/\{\{companyContent\}\}/g, companyContent)
+    .replace(/\{\{profileName\}\}/g, profile.name)
+    .replace(/\{\{profileFirm\}\}/g, profile.firm)
+    .replace(/\{\{profileRole\}\}/g, profile.role);
+}
 
 export async function generateOutreachEmail({
   companyContent,
   companyUrl,
   profile,
+  promptSettings,
 }: GenerateEmailParams): Promise<GenerateEmailResult> {
-  const systemPrompt = `You are an expert at writing personalized, authentic VC outreach emails. Your emails sound natural and human - never templated or formulaic.
+  const systemPrompt = promptSettings?.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+  const userPromptTemplate = promptSettings?.userPromptTemplate || DEFAULT_USER_PROMPT_TEMPLATE;
 
-Your task is to generate a warm, personalized outreach email from a VC to a startup founder.
+  const userPrompt = buildUserPrompt(userPromptTemplate, companyUrl, companyContent, profile);
 
-IMPORTANT: Before writing the email, use the web_search tool to research this company. Look for:
-- Recent funding rounds or news
-- Product launches or features
-- The founding team's background
-- Business model and market position
-- Any interesting technology or approach they're using
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    messages: [
+      {
+        role: 'user',
+        content: userPrompt,
+      },
+    ],
+    system: systemPrompt,
+  });
 
-Use these insights to craft a genuine, specific hook that shows you've done your homework.
-
-Guidelines:
-- Keep the email between 100-150 words (3-4 short paragraphs)
-- Start with a genuine, specific hook about what interests you about their company
-- Add a brief perspective on the market/space that shows you understand their world
-- End with a soft ask for a quick chat (not pushy)
-- Sound conversational and human, not corporate
-- Don't use buzzwords or clichés
-- Don't start with "I hope this email finds you well" or similar generic openings`;
-
-  const userPrompt = `Generate an outreach email based on this information:
-
-**Company URL:** ${companyUrl}
-
-**Company Information (from their website):**
-${companyContent}
-
-**Sender Profile:**
-- Name: ${profile.name}
-- Firm: ${profile.firm}
-- Role: ${profile.role}
-- Focus Areas: ${profile.focusAreas.join(', ')}
-
-**Email Signature to use:**
-${profile.signature}
-
-Please research the company using web search to find additional context like funding rounds, news, or team background. Then respond in the following JSON format:
-{
-  "companyName": "The company's name",
-  "summary": "A 1-2 sentence summary of what the company does",
-  "email": "The full outreach email including the signature"
-}
-
-Make sure the email is personalized based on specific details from your research.`;
-
-  // Build messages array for multi-turn conversation (using beta types)
-  type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
-  type BetaContentBlock = Anthropic.Beta.Messages.BetaContentBlock;
-  type BetaToolResultBlockParam = Anthropic.Beta.Messages.BetaToolResultBlockParam;
-
-  const messages: BetaMessageParam[] = [
-    {
-      role: 'user',
-      content: userPrompt,
-    },
-  ];
-
-  // Loop to handle tool use - Claude may make multiple web searches
-  let turns = 0;
-  while (turns < MAX_TOOL_USE_TURNS) {
-    turns++;
-
-    const response = await anthropic.beta.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages,
-      system: systemPrompt,
-      betas: ['web-search-2025-03-05'],
-    });
-
-    // Check if we got a final response (end_turn means Claude is done)
-    if (response.stop_reason === 'end_turn') {
-      return extractEmailResult(response.content);
-    }
-
-    // If Claude wants to use tools, continue the conversation
-    if (response.stop_reason === 'tool_use') {
-      // Add assistant's response (which includes tool_use blocks)
-      messages.push({
-        role: 'assistant',
-        content: response.content,
-      });
-
-      // For server-side tools like web_search, the results are returned
-      // automatically by Anthropic's servers. We just continue the conversation.
-      const toolUseBlocks = response.content.filter(
-        (block): block is Anthropic.Beta.Messages.BetaToolUseBlock =>
-          block.type === 'tool_use'
-      );
-
-      if (toolUseBlocks.length > 0) {
-        // Add empty tool results to acknowledge - server tools execute automatically
-        const toolResults: BetaToolResultBlockParam[] = toolUseBlocks.map(
-          (block) => ({
-            type: 'tool_result' as const,
-            tool_use_id: block.id,
-            content: '',
-          })
-        );
-
-        messages.push({
-          role: 'user',
-          content: toolResults,
-        });
-      }
-
-      continue;
-    }
-
-    // For any other stop reason, try to extract what we have
-    return extractEmailResult(response.content);
-  }
-
-  throw new Error('Max tool use turns exceeded');
-}
-
-/**
- * Strip web search citation tags from text
- * Citations appear as <cite index="X-Y">text</cite> or <cite index="X-Y" />
- */
-function stripCitations(text: string): string {
-  return text
-    .replace(/<cite\s+index="[^"]*"\s*\/>/g, '')
-    .replace(/<cite\s+index="[^"]*">([\s\S]*?)<\/cite>/g, '$1')
-    .replace(/<\/?source_location[^>]*>/g, '')
-    .trim();
-}
-
-/**
- * Extract the email result from Claude's response content
- */
-function extractEmailResult(
-  content: Anthropic.Beta.Messages.BetaContentBlock[]
-): GenerateEmailResult {
-  // Find the text block in the response
-  const textBlock = content.find(
-    (block): block is Anthropic.Beta.Messages.BetaTextBlock =>
-      block.type === 'text'
-  );
-
-  if (!textBlock) {
-    throw new Error('No text response from Claude');
+  const content = response.content[0];
+  if (content.type !== 'text') {
+    throw new Error('Unexpected response type from Claude');
   }
 
   try {
-    // Try to parse JSON from the response
-    // Handle case where JSON might be wrapped in markdown code blocks
-    let jsonText = textBlock.text;
-    const jsonMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    // Extract JSON from potential markdown code blocks
+    let jsonText = content.text;
+    const jsonMatch = content.text.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (jsonMatch) {
       jsonText = jsonMatch[1].trim();
     }
 
     const result = JSON.parse(jsonText);
     return {
-      email: stripCitations(result.email),
-      companyName: stripCitations(result.companyName),
-      summary: stripCitations(result.summary),
+      email: result.email,
+      companyName: result.companyName,
+      summary: result.summary,
     };
   } catch {
     // If JSON parsing fails, try to extract the email from the response
     return {
-      email: stripCitations(textBlock.text),
+      email: content.text,
       companyName: 'Unknown',
       summary: 'Could not extract summary',
+    };
+  }
+}
+
+interface FollowUpEmailParams {
+  companyName: string;
+  companySummary: string;
+  companyUrl: string;
+  originalEmail: string;
+  previousFollowUps: string[];
+  followUpNumber: number;
+  profile: UserProfile;
+  promptSettings?: PromptSettings;
+}
+
+interface FollowUpEmailResult {
+  email: string;
+}
+
+function buildFollowUpUserPrompt(
+  template: string,
+  params: Omit<FollowUpEmailParams, 'promptSettings'>
+): string {
+  const previousFollowUpsText = params.previousFollowUps.length > 0
+    ? `**Previous Follow-ups:**\n${params.previousFollowUps.map((email, i) => `Follow-up #${i + 1}:\n${email}`).join('\n\n')}`
+    : '';
+
+  return template
+    .replace(/\{\{companyName\}\}/g, params.companyName)
+    .replace(/\{\{companySummary\}\}/g, params.companySummary || '')
+    .replace(/\{\{companyUrl\}\}/g, params.companyUrl)
+    .replace(/\{\{originalEmail\}\}/g, params.originalEmail)
+    .replace(/\{\{previousFollowUps\}\}/g, previousFollowUpsText)
+    .replace(/\{\{followUpNumber\}\}/g, String(params.followUpNumber))
+    .replace(/\{\{profileName\}\}/g, params.profile.name)
+    .replace(/\{\{profileFirm\}\}/g, params.profile.firm);
+}
+
+export async function generateFollowUpEmail(
+  params: FollowUpEmailParams
+): Promise<FollowUpEmailResult> {
+  const systemPrompt = params.promptSettings?.followUpSystemPrompt || DEFAULT_FOLLOW_UP_SYSTEM_PROMPT;
+  const userPromptTemplate = params.promptSettings?.followUpUserPromptTemplate || DEFAULT_FOLLOW_UP_USER_PROMPT_TEMPLATE;
+
+  const userPrompt = buildFollowUpUserPrompt(userPromptTemplate, params);
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    messages: [
+      {
+        role: 'user',
+        content: userPrompt,
+      },
+    ],
+    system: systemPrompt,
+  });
+
+  const content = response.content[0];
+  if (content.type !== 'text') {
+    throw new Error('Unexpected response type from Claude');
+  }
+
+  try {
+    // Extract JSON from potential markdown code blocks
+    let jsonText = content.text;
+    const jsonMatch = content.text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonText = jsonMatch[1].trim();
+    }
+
+    const result = JSON.parse(jsonText);
+    return {
+      email: result.email,
+    };
+  } catch {
+    // If JSON parsing fails, return the raw text as the email
+    return {
+      email: content.text,
     };
   }
 }

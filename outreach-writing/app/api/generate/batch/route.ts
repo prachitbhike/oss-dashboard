@@ -5,11 +5,13 @@ import {
   BatchResult,
   BatchItemResult,
 } from '@/lib/batch-processor';
+import { PromptSettings } from '@/lib/anthropic';
 
 export const maxDuration = 300; // 5 minute timeout for batch processing
 
 interface BatchRequestBody {
   urls: string[];
+  promptSettings?: PromptSettings;
   options?: {
     maxConcurrent?: number;
   };
@@ -18,7 +20,7 @@ interface BatchRequestBody {
 export async function POST(request: NextRequest) {
   try {
     const body: BatchRequestBody = await request.json();
-    const { urls, options } = body;
+    const { urls, promptSettings, options } = body;
 
     // Validate input
     if (!urls || !Array.isArray(urls)) {
@@ -59,6 +61,7 @@ export async function POST(request: NextRequest) {
     // Create batch processor with options
     const processor = new BatchProcessor({
       maxConcurrent: Math.min(options?.maxConcurrent ?? 5, 10), // Cap at 10
+      promptSettings,
     });
 
     // Process the batch
@@ -86,6 +89,7 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const urlsParam = searchParams.get('urls');
   const maxConcurrentParam = searchParams.get('maxConcurrent');
+  const promptSettingsParam = searchParams.get('promptSettings');
 
   if (!urlsParam) {
     return NextResponse.json(
@@ -102,6 +106,15 @@ export async function GET(request: NextRequest) {
       { error: 'Invalid URLs parameter - must be JSON array' },
       { status: 400 }
     );
+  }
+
+  let promptSettings: PromptSettings | undefined;
+  if (promptSettingsParam) {
+    try {
+      promptSettings = JSON.parse(promptSettingsParam);
+    } catch {
+      // Ignore invalid prompt settings, use defaults
+    }
   }
 
   if (!Array.isArray(urls) || urls.length === 0) {
@@ -148,6 +161,7 @@ export async function GET(request: NextRequest) {
 
       const processor = new BatchProcessor({
         maxConcurrent,
+        promptSettings,
         onProgress: (progress) => {
           sendEvent('progress', progress);
         },
